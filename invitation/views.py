@@ -37,8 +37,9 @@ def invited(request, invitation_key=None, invitation_email=None, extra_context=N
         extra_context = extra_context is not None and extra_context.copy() or {}
         extra_context.update({'invitation_key': invitation_key})
         extra_context.update({'invitation_email': invitation_email})
-        request.session['invitation_key'] = get_key(invitation_key)
-        request.session['invitation_email'] = invitation_email
+        invitation_key_obj = get_key(invitation_key)
+        request.session['invitation_key'] = invitation_key_obj
+        request.session['invitation_email'] = invitation_key_obj.recipient or invitation_email 
         request.session['invitation_context'] = extra_context or {}
         return direct_to_template(request, template_name, extra_context)
     else:
@@ -58,7 +59,6 @@ def register(request, backend, success_url=None,
         if invitation_key:
             extra_context.update({'invitation_key': invitation_key})
             if is_key_valid(invitation_key):
-                print '----register key is valid'
                 return registration_register(request, backend, success_url,
                                             form_class, disallowed_url,
                                             template_name, extra_context)
@@ -83,8 +83,9 @@ def invite(request, success_url=None,
                           remaining_invitations=remaining_invitations, 
                           user_email=request.user.email)
         if form.is_valid():
-            invitation = InvitationKey.objects.create_invitation(request.user)
-            invitation.send_to(form.cleaned_data["email"])
+            recipient = form.cleaned_data["email"]
+            invitation = InvitationKey.objects.create_invitation(request.user, recipient)
+            invitation.send_to(recipient)
             # success_url needs to be dynamically generated here; setting a
             # a default value using reverse() will cause circular-import
             # problems with the default URLConf for this application, which
@@ -115,11 +116,10 @@ def send_bulk_invitations(request, success_url=None):
         sender_note = request.POST['sender_note']
         from_email = request.POST['from_email']
         from_user = request.user
-        print to_emails
         if len(to_emails)>0 and to_emails[0] != '' : 
-            for e in to_emails:
-                invitation = InvitationKey.objects.create_invitation(request.user)
-                invitation.send_to(e, from_email, sender_note)
+            for recipient in to_emails:
+                invitation = InvitationKey.objects.create_invitation(request.user, recipient)
+                invitation.send_to(recipient, from_email, sender_note)
             messages.success(request, "Mail sent successfully")
             return HttpResponseRedirect(success_url or reverse('invitation_invite_bulk'))
         else:

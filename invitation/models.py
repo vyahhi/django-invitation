@@ -38,7 +38,7 @@ class InvitationKeyManager(models.Manager):
         invitation_key = self.get_key(invitation_key)
         return invitation_key and invitation_key.is_usable()
 
-    def create_invitation(self, user):
+    def create_invitation(self, user, recipient):
         """
         Create an ``InvitationKey`` and returns it.
         
@@ -47,11 +47,11 @@ class InvitationKeyManager(models.Manager):
         """
         salt = sha_constructor(str(random.random())).hexdigest()[:5]
         key = sha_constructor("%s%s%s" % (datetime.datetime.now(), salt, user.username)).hexdigest()
-        return self.create(from_user=user, key=key)
+        return self.create(from_user=user, key=key, recipient=recipient)
     
-    def create_bulk_invitation(self, user, key, uses):
+    def create_bulk_invitation(self, user, key, uses, recipient):
         """ Create a set of invitation keys - these can be used by anyone, not just a specific recipient """
-        return self.create(from_user=user, key=key, uses_left=uses)
+        return self.create(from_user=user, key=key, uses_left=uses, recipient=None)
 
     def remaining_invitations_for_user(self, user):
         """
@@ -79,6 +79,8 @@ class InvitationKey(models.Model):
     uses_left = models.IntegerField(default=1)
     
     objects = InvitationKeyManager()
+    
+    recipient = models.EmailField(default=None, null=True)
     
     def __unicode__(self):
         return u"Invitation from %s on %s (%s)" % (self.from_user.username, self.date_invited, self.key)
@@ -125,7 +127,7 @@ class InvitationKey(models.Model):
         # Email subject *must not* contain newlines
         subject = ''.join(subject.splitlines())
         
-        #TODO:jp email added as temtp measure...should be added to model
+        #TODO:email may be removed at a later date now that we have recipient in model
         context = { 'invitation_key': self,
                     'expiration_days': settings.ACCOUNT_INVITATION_DAYS,
                     'from_user': self.from_user,
