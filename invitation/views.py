@@ -25,6 +25,7 @@ from invitation.forms import InvitationKeyForm
 from invitation.backends import InvitationBackend
 
 is_key_valid = InvitationKey.objects.is_key_valid
+get_key = InvitationKey.objects.get_key
 remaining_invitations_for_user = InvitationKey.objects.remaining_invitations_for_user
 
 def invited(request, invitation_key=None, invitation_email=None, extra_context=None):
@@ -36,8 +37,9 @@ def invited(request, invitation_key=None, invitation_email=None, extra_context=N
         extra_context = extra_context is not None and extra_context.copy() or {}
         extra_context.update({'invitation_key': invitation_key})
         extra_context.update({'invitation_email': invitation_email})
-        request.session['invitation_key'] = invitation_key
+        request.session['invitation_key'] = get_key(invitation_key)
         request.session['invitation_email'] = invitation_email
+        request.session['invitation_context'] = extra_context or {}
         return direct_to_template(request, template_name, extra_context)
     else:
         return HttpResponseRedirect(reverse('registration_register'))
