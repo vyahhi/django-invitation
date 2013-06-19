@@ -7,6 +7,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.sites.models import Site
 from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib import messages
+from django.utils.safestring import mark_safe
 
 if getattr(settings, 'INVITATION_USE_ALLAUTH', False):
     from allauth.socialaccount.views import signup as allauth_signup
@@ -108,34 +109,41 @@ def invite(request, success_url=None,
     return direct_to_template(request, template_name, extra_context)
 invite = login_required(invite)
 
+
 @staff_member_required
 def send_bulk_invitations(request, success_url=None):
     current_site = Site.objects.get_current()
     if request.POST.get('post'):
         to_emails = [e.strip(' ') for e in request.POST['to_emails'].split(',')]
         sender_note = request.POST['sender_note']
+        print sender_note
         from_email = request.POST['from_email']
         from_user = request.user
         if len(to_emails)>0 and to_emails[0] != '' : 
             for recipient in to_emails:
                 invitation = InvitationKey.objects.create_invitation(request.user, recipient)
-                invitation.send_to(recipient, from_email, sender_note)
+                try:
+                    print 'send_bulk_invitations', sender_note
+                    invitation.send_to(recipient, from_email, mark_safe(sender_note))
+                except:
+                    messages.error(request, "Mail to %s failed" % recipient)
             messages.success(request, "Mail sent successfully")
             return HttpResponseRedirect(success_url or reverse('invitation_invite_bulk'))
         else:
             messages.error(request, 'You did not provied any email addresses.')
             return HttpResponseRedirect(reverse('invitation_invite_bulk'))
     else:
+        preview_context = {'invitation_key': 'xxxxxxxxx',
+                         'expiration_days': settings.ACCOUNT_INVITATION_DAYS,
+                         'from_user': request.user,
+                         'sender_note': '--your note will be inserted here--',
+                         'email': 'invitee@example.com',
+                         'full_preview': True,
+                         'site': current_site }
         context = {
             'title': "Send Bulk Invitations",
-            'preview': render_to_string('invitation/invitation_email.txt', 
-                                   { 'invitation_key': 'xxxxxxxxx',
-                                     'expiration_days': settings.ACCOUNT_INVITATION_DAYS,
-                                     'from_user': request.user,
-                                     'sender_note': '--your note will be inserted here--',
-                                     'email': 'invitee@example.com',
-                                     'full_preview': True,
-                                     'site': current_site }),
+            'html_preview': render_to_string('invitation/invitation_email.html', preview_context),
+            'text_preview': render_to_string('invitation/invitation_email.txt', preview_context),
         }
         return direct_to_template(request, 'invitation/invitation_form_bulk.html',
             context)

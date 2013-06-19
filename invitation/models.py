@@ -11,6 +11,8 @@ from django.core.mail import send_mail, EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.contrib.sites.models import Site
 from django.utils.timezone import now
+from django.utils.html import strip_tags
+from django.utils.safestring import mark_safe
 
 if getattr(settings, 'INVITATION_USE_ALLAUTH', False):
     import re
@@ -134,9 +136,10 @@ class InvitationKey(models.Model):
                     'email': email,
                     'sender_note': sender_note,
                     'site': current_site }
-                    
-        message = render_to_string('invitation/invitation_email.txt',context)
+        
         message_html = render_to_string('invitation/invitation_email.html',context)
+        context.update({'sender_note':mark_safe(strip_tags(sender_note))})
+        message = render_to_string('invitation/invitation_email.txt',context)
         msg = EmailMultiAlternatives(subject, message, from_email, [email])
         msg.attach_alternative(message_html, "text/html")
         msg.send()
