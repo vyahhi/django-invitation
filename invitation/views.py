@@ -29,19 +29,24 @@ is_key_valid = InvitationKey.objects.is_key_valid
 get_key = InvitationKey.objects.get_key
 remaining_invitations_for_user = InvitationKey.objects.remaining_invitations_for_user
 
-def invited(request, invitation_key=None, invitation_email=None, extra_context=None):
+def invited(request, invitation_key=None, invitation_recipient=None, extra_context=None):
     if getattr(settings, 'INVITE_MODE', False):
-        if invitation_key and is_key_valid(invitation_key):
-            template_name = 'invitation/invited.html'
-        else:
-            template_name = 'invitation/wrong_invitation_key.html'
         extra_context = extra_context is not None and extra_context.copy() or {}
-        extra_context.update({'invitation_key': invitation_key})
-        extra_context.update({'invitation_email': invitation_email})
-        invitation_key_obj = get_key(invitation_key)
-        request.session['invitation_key'] = invitation_key_obj
-        request.session['invitation_email'] = invitation_key_obj.recipient or invitation_email 
-        request.session['invitation_context'] = extra_context or {}
+        template_name = 'invitation/wrong_invitation_key.html'
+        if invitation_key:
+            extra_context.update({'invitation_key': invitation_key})
+            valid_key_obj = is_key_valid(invitation_key)
+            if valid_key_obj:
+                template_name = 'invitation/invited.html'
+                invitation_recipient = valid_key_obj.recipient or invitation_recipient
+                #convert any old invitation email to new format
+                if not isinstance(invitation_recipient, tuple):
+                    invitation_recipient = (invitation_recipient, None, None)
+                extra_context.update({'invitation_recipient': invitation_recipient})
+                request.session['invitation_key'] = valid_key_obj
+                request.session['invitation_recipient'] = invitation_recipient
+                request.session['invitation_context'] = extra_context or {}
+
         return direct_to_template(request, template_name, extra_context)
     else:
         return HttpResponseRedirect(reverse('registration_register'))
@@ -82,11 +87,12 @@ def invite(request, success_url=None,
     if request.method == 'POST':
         form = form_class(data=request.POST, files=request.FILES, 
                           remaining_invitations=remaining_invitations, 
-                          user_email=request.user.email)
+                          user=request.user)
         if form.is_valid():
-            recipient = form.cleaned_data["email"]
+            recipient = form.cleaned_data["recipient"]
+            sender_note = form.cleaned_data["sender_note"]
             invitation = InvitationKey.objects.create_invitation(request.user, recipient)
-            invitation.send_to(recipient)
+            invitation.send_to(sender_note=sender_note)
             # success_url needs to be dynamically generated here; setting a
             # a default value using reverse() will cause circular-import
             # problems with the default URLConf for this application, which
@@ -94,17 +100,12 @@ def invite(request, success_url=None,
             return HttpResponseRedirect(success_url or reverse('invitation_complete'))
     else:
         form = form_class()
-
-    email_preview = render_to_string('invitation/invitation_email.txt',
-                                   { 'invitation_key': None,
-                                     'email': 'invitee@example.com',
-                                     'expiration_days': settings.ACCOUNT_INVITATION_DAYS,
-                                     'from_user': request.user,
-                                     'site': Site.objects.get_current() })
+    invitation = InvitationKey.objects.create_invitation(request.user, save=False)
+    preview_context = invitation.get_context('--your note will be inserted here--')
     extra_context.update({
             'form': form,
             'remaining_invitations': remaining_invitations,
-            'email_preview': email_preview,
+            'email_preview': render_to_string('invitation/invitation_email.html', preview_context),
         })
     return direct_to_template(request, template_name, extra_context)
 invite = login_required(invite)
@@ -114,32 +115,27 @@ invite = login_required(invite)
 def send_bulk_invitations(request, success_url=None):
     current_site = Site.objects.get_current()
     if request.POST.get('post'):
-        to_emails = [e.strip(' ') for e in request.POST['to_emails'].split(',')]
+        to_emails = [(e.split(',')[0].strip(),e.split(',')[1].strip() or None,e.split(',')[2].strip() or None) if e.find(',')+1 else (e.strip() or None, None, None) for e in request.POST['to_emails'].split(';')]
+        #to_emails = [(e.split(',')[0],e.split(',')[1]) if e.find(',') else tuple('',e) for e in request.POST['to_emails'].split(';')]
         sender_note = request.POST['sender_note']
-        print sender_note
         from_email = request.POST['from_email']
-        from_user = request.user
-        if len(to_emails)>0 and to_emails[0] != '' : 
+        if len(to_emails)>0 and to_emails[0] != '': 
             for recipient in to_emails:
-                invitation = InvitationKey.objects.create_invitation(request.user, recipient)
-                try:
-                    print 'send_bulk_invitations', sender_note
-                    invitation.send_to(recipient, from_email, mark_safe(sender_note))
-                except:
-                    messages.error(request, "Mail to %s failed" % recipient)
+                if recipient[0]:
+                    invitation = InvitationKey.objects.create_invitation(request.user, recipient)
+                    try:
+                        invitation.send_to(from_email, mark_safe(sender_note))
+                    except:
+                        messages.error(request, "Mail to %s failed" % recipient[0])
             messages.success(request, "Mail sent successfully")
             return HttpResponseRedirect(success_url or reverse('invitation_invite_bulk'))
         else:
             messages.error(request, 'You did not provied any email addresses.')
             return HttpResponseRedirect(reverse('invitation_invite_bulk'))
     else:
-        preview_context = {'invitation_key': 'xxxxxxxxx',
-                         'expiration_days': settings.ACCOUNT_INVITATION_DAYS,
-                         'from_user': request.user,
-                         'sender_note': '--your note will be inserted here--',
-                         'email': 'invitee@example.com',
-                         'full_preview': True,
-                         'site': current_site }
+        invitation = InvitationKey.objects.create_invitation(request.user, save=False)
+        preview_context = invitation.get_context('--your note will be inserted here--')
+        
         context = {
             'title': "Send Bulk Invitations",
             'html_preview': render_to_string('invitation/invitation_email.html', preview_context),
@@ -147,3 +143,48 @@ def send_bulk_invitations(request, success_url=None):
         }
         return direct_to_template(request, 'invitation/invitation_form_bulk.html',
             context)
+
+from django.shortcuts import redirect
+from django.core.files.storage import default_storage
+import urllib2
+import mimetypes
+from django.http import HttpResponse
+from urlparse import urlparse, urlunparse
+            
+def token(request, key):
+    '''
+    Returns an aproproate token image.  If the key is valid & token image existis a personalized
+    token is returned or else a token image marked invalid is returned.
+    '''
+    print  '---token'
+    site = Site.objects.get_current()
+    scheme = 'http'
+    if request.is_secure():
+        scheme = 'https'
+    root_url = '%s://%s' % (scheme, site.domain)
+    r_parse = urlparse(root_url, scheme)
+    s_parse = urlparse(settings.STATIC_URL, scheme)
+    m_parse = urlparse(settings.MEDIA_URL, scheme)
+    s_parts = (s_parse.scheme, s_parse.netloc or r_parse.netloc, s_parse.path, s_parse.params, s_parse.query, s_parse.fragment)
+    static_url = urlunparse(s_parts)
+    m_parts = (m_parse.scheme, m_parse.netloc or r_parse.netloc, m_parse.path, m_parse.params, m_parse.query, m_parse.fragment)
+    media_url = urlunparse(m_parts)
+    print 'static_url', static_url
+    print 'media_url', media_url
+        
+    token_url = '%stokens/%s.png' % (media_url, key)
+    print token_url
+    token_invalid_url = '%snotification/img/%s.png' % (static_url, 'token-invalid')
+    token_path = 'tokens/%s.png' % key
+    valid_key = is_key_valid(key) or key == 'previewkey00000000'
+    if default_storage.exists(token_path) and valid_key:
+        contents = urllib2.urlopen(token_url).read()
+        mimetype = mimetypes.guess_type(token_url)
+        response = HttpResponse(contents, mimetype=mimetype)
+    else:
+        contents = urllib2.urlopen(token_invalid_url).read()
+        mimetype = mimetypes.guess_type(token_invalid_url)
+        response = HttpResponse(contents, mimetype=mimetype)
+    
+    return response
+    
